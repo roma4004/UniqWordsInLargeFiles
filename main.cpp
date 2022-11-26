@@ -1,9 +1,7 @@
 #include <iostream>
-#include <set>
 #include <fstream>
+#include <set>
 #include <memory>
-#include <string_view>
-#include <algorithm>
 
 int main()
 {
@@ -11,11 +9,12 @@ int main()
 //TODO: if empty insert
 
 	std::ifstream file(R"(D:\Desktop\SubStrA\bigfile.txt)", std::ios::app | std::ios::ate);
-	std::cout << file.tellg() << "Of Total Bytes" << "\n";
+	//DEBUG: file size
+//	std::cout << file.tellg() << "Of Total Bytes" << "\n";
 	file.seekg(0, std::ios::beg); // rewind to the beginning of file
 
-	std::string             prevPart;
-	constexpr size_t        bufferSize = 1; //16kb
+	std::string      prevPart;
+	constexpr size_t bufferSize = 16000; //16kb
 
 	while (file)
 	{
@@ -47,8 +46,8 @@ int main()
 
 		//parsing unique words
 		const std::string_view& target = std::string_view(buffer.get(), bytesRead + prevLength);
-		// output buffer
-		std::cout << "buffer:" << target << std::endl;
+		//DEBUG: output buffer
+//		std::cout << "---buffer: " << target << std::endl;
 		auto it = target.begin();
 		int i = 0;
 		for (; it != target.end(); ++it, ++i)
@@ -71,7 +70,7 @@ int main()
 			{
 				if (bytesRead == 0)
 				{
-					auto word = std::string(target, i, prevLength);
+					auto word = std::string(target, i, wordLen);
 					occurrence->insert(word);
 				}
 				else
@@ -83,18 +82,21 @@ int main()
 			else // or just add this to unique word storage
 			{
 				//unique filtering
-				auto word = std::string(target, i, prevLength);
+				auto word = std::string(target, i, wordLen);
 				occurrence->insert(word);
 				i += wordLen;
 			}
 		}
 	}
 
-	// output buffer
-	std::cout << "occurrence:" << std::endl;
-	for (auto it : *occurrence)
-		std::cout << it << '|' << std::endl;
-	std::cout << "total words count is: " << occurrence->size() << std::endl;
-	std::cout << "the end" << std::endl;
+	//DEBUG: output buffer
+//	std::cout << "occurrence:" << std::endl;
+//	for (const auto& it : *occurrence)
+//		std::cout << it << '|' << std::endl;
+
+	//DEBUG: msg
+//	std::cout << "total words count is: ";
+	std::cout << occurrence->size() << std::endl;
+
 	return 0;
 }
