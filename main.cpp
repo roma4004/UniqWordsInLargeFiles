@@ -1,7 +1,7 @@
 #include <iostream>
 #include <set>
 
-int GetWordLen(const std::string_view& target, const char* it)
+int GetWordLen(const std::string_view& target, std::string_view::const_iterator& it)
 {
 	int wordLen = 0;
 	for (; it != target.end() &&  std::isalpha(*it); ++wordLen, ++it);
