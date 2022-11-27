@@ -2,12 +2,13 @@
 #include <fstream>
 #include <set>
 #include <memory>
+#include <filesystem> // Compile with /std:c++17 or higher
 
 std::unique_ptr<char[]> InitializeBuffer(std::string& initWith, size_t len, const size_t bufferSize)
 {
 	std::unique_ptr<char[]> buffer = std::make_unique<char[]>(len + bufferSize);
 
-	if (initWith.empty())
+	if (!initWith.empty())
 	{
 		for (int i = 0; i < len; ++i) // restoring remaining word part to buffer
 		{
@@ -82,12 +83,28 @@ std::set<std::string>* ParseUniqWordsFromFile(std::ifstream& file)
 	return occurrence;
 }
 
-int main()
+int main(int argc, char *argv[])
 {
-//TODO: if empty insert
+	if (argc < 2 || argc > 2)
+	{
+		std::cout << "please pass as argument full file name, like \"D://bigFile.txt\"" << std::endl;
+		return 0;
+	}
 
-	std::ifstream file(R"(D:\Desktop\SubStrA\bigfile.txt)", std::ios::app | std::ios::ate);
+	// NOTE:
+	// .generic_string() in Windows: "c:/temp/test.txt"
+	// ios_base::in - Open file for reading
+	std::filesystem::path p(argv[1]);
+	std::ifstream file(p.generic_string(), std::ios::in);
+
+	if (file.fail())
+	{
+		perror("error due file opening, details");
+		return 1;
+	}
+
 	auto* occurrence = ParseUniqWordsFromFile(file);
+	file.close();
 
 	//DEBUG: output buffer
 //	std::cout << "occurrence:" << std::endl;
