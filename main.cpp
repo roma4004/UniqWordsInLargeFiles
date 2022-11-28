@@ -57,7 +57,7 @@ void parseWords(const std::string_view& str, std::set<std::string>* uniqWords, s
 
 std::set<std::string>* ParseUniqWordsFromFile(std::ifstream& file)
 {
-	constexpr size_t bufferSize = 16000; //16kb
+	constexpr size_t bufferSize = 512'000'000; // 512 Mb
 	file.seekg(0, std::ios::beg); // rewind to the beginning of file
 	auto occurrence = new std::set<std::string>(); //TODO: check it can be just char* ?
 	std::string prevPart;
@@ -83,11 +83,62 @@ std::set<std::string>* ParseUniqWordsFromFile(std::ifstream& file)
 	return occurrence;
 }
 
+void testFileGenerator()
+{
+	static const char PossibleSymbols[] =
+		" \n"
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		"abcdefghijklmnopqrstuvwxyz";
+	const size_t      randomBlockSize   = 512'000; // 512Mb
+	const size_t      desiredFileSize   = 1'073'741'824; // 1 GB
+	srand(time(nullptr));
+
+	std::string testsFileName = std::string("_only_for_testing_big_file_32gb_");
+	std::ofstream testsFile("./", std::ios::out);
+	testsFile.open(testsFileName);
+
+	for (int i = 0; i < desiredFileSize; ++i)
+	{
+
+		std::string tmp_s;
+		tmp_s.reserve(randomBlockSize);
+		int j = 0;
+		for (; j < randomBlockSize && i + j < desiredFileSize; ++j)
+		{
+			tmp_s += PossibleSymbols[rand() % (sizeof(PossibleSymbols) - 1)];
+		}
+		i += j;
+		testsFile << tmp_s << std::endl;
+	}
+
+	testsFile.close();
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc < 2 || argc > 2)
 	{
 		std::cout << "please pass as argument full file name, like \"D://bigFile.txt\"" << std::endl;
+		return 0;
+	}
+
+	std::string command1  = {"./run_test"};
+	bool isCommand = true;
+	unsigned long long int commandLength = command1.length();
+
+	for (int i = 0; argv[1][i] != '\0' && i < commandLength; ++i)
+	{
+		if (argv[1][i] != command1[i])
+		{
+			isCommand = false;
+			break;
+		}
+	}
+
+	if (argv[1][0] != '\0' && isCommand)
+	{
+		testFileGenerator();
+
 		return 0;
 	}
 
@@ -100,7 +151,7 @@ int main(int argc, char *argv[])
 	if (file.fail())
 	{
 		perror("error due file opening, details");
-		return 1;
+		exit(1);
 	}
 
 	auto* occurrence = ParseUniqWordsFromFile(file);
@@ -111,8 +162,6 @@ int main(int argc, char *argv[])
 //	for (const auto& it : *occurrence)
 //		std::cout << it << '|' << std::endl;
 
-	//DEBUG: msg
-//	std::cout << "total words count is: ";
 	std::cout << occurrence->size() << std::endl;
 
 	return 0;
