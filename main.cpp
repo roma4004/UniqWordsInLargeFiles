@@ -1,17 +1,20 @@
 #include <iostream>
 #include <fstream>
-#include <unordered_set>
-//#include <memory>
 #include <filesystem> // Compile with /std:c++17 or higher
 #include <thread>
 #include <mutex>
 #include <chrono>
+#include <unordered_set>
 #include <deque>
 
 #include "testFileGenerator.h"
 
 void FileParser(std::deque<std::string> *parsingQueue, std::ifstream &file, std::mutex &write_mtx);
-void ParseWords(std::deque<std::string>* textBlocks, std::unordered_set<std::string>* uniqWords, std::mutex& writeDequeMtx, std::mutex& writeUniqMtx);
+
+void ParseWords(std::deque<std::string> *strBlocks, std::unordered_set<std::string> *uniqWords,
+				std::mutex &blocksMtx, std::mutex &wordMtx);
+
+char *BackupBlock(const std::unique_ptr<char[]> &buffer, size_t startPos, size_t prevBufferSize);
 
 int main(int argc, char *argv[]) {
 	if (argc < 2 || argc > 2) {
@@ -19,11 +22,10 @@ int main(int argc, char *argv[]) {
 		return 0;
 	}
 
-	std::string command1 = {"./run_test"};
+	const std::string command1{"./run_test"};
 	bool isCommand = true;
-	unsigned long long int commandLength = command1.length();
-
-	for (int i = 0; argv[1][i] != '\0' && i < commandLength; ++i) {
+	size_t commandLength = command1.length();
+	for (unsigned int i = 0; argv[1][i] != '\0' && i < commandLength; ++i) {
 		if (argv[1][i] != command1[i]) {
 			isCommand = false;
 			break;
@@ -47,146 +49,116 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 
-	auto* splitBlocks = new std::deque<std::string>();
-	std::mutex writeDequeMtx;
-	std::mutex writeUniqMtx;
-
-	auto *uniqWords = new std::unordered_set<std::string>(); //TODO: check it can be just char* ?
-
 	const unsigned int threadsAmount = std::thread::hardware_concurrency();
+	std::mutex blockMtx, wordMtx;
 	std::vector<std::thread> threads(threadsAmount);
+	auto *uniqWords = new std::unordered_set<std::string>(); //TODO: check it can be just char* ?
+	auto *strBlocks = new std::deque<std::string>();
 //TODO: add atomic bool to display for all thread that queue adding in progress, then if false thread end their work if see empty queue;
-	if (threadsAmount == 1)
-	{
-		std::thread t1 = std::thread{FileParser, splitBlocks, std::ref(file), std::ref(writeDequeMtx)};
+	if (threadsAmount == 1) {
+		std::thread t1 = std::thread{FileParser, strBlocks, std::ref(file), std::ref(blockMtx)};
 		t1.join();
-		std::thread t2 = std::thread{ParseWords, splitBlocks, uniqWords, std::ref(writeDequeMtx), std::ref(writeUniqMtx)};
+		std::thread t2 = std::thread{ParseWords, strBlocks, uniqWords, std::ref(blockMtx), std::ref(wordMtx)};
 		t2.join();
-	}
-	else
-	{
-		for (unsigned int threadId = 0; threadId < threadsAmount; ++threadId)
-		{
-			if (threadId == 0)
-			{
-				threads[threadId] = std::thread{FileParser, splitBlocks, std::ref(file), std::ref(writeDequeMtx)};
-			}
-			else
-			{
-				threads[threadId] = std::thread{ParseWords, splitBlocks, uniqWords, std::ref(writeDequeMtx), std::ref(writeUniqMtx)};
+	} else {
+		for (unsigned int id = 0; id < threadsAmount; ++id) {
+			if (id == 0) {
+				threads[id] = std::thread{FileParser, strBlocks, std::ref(file), std::ref(blockMtx)};
+			} else {
+				threads[id] = std::thread{ParseWords, strBlocks, uniqWords, std::ref(blockMtx), std::ref(wordMtx)};
 			}
 		}
 
-		for (auto& thread : threads) thread.join();
+		for (auto &thread: threads) thread.join();
 	}
-
 
 	file.close();
 
+	//DEBUG: output queue
 //	std::cout << "queue:" << std::endl;
-//	for (const auto& it: *splitBlocks)
+//	for (const auto& it: *strBlocks)
 //		std::cout << '/' << it << '/' << std::endl;
 
-	//DEBUG: output buffer
-	std::cout << "occurrence:" << std::endl;
-	for (const auto &it: *uniqWords)
-		std::cout << '|' << it << '|' << std::endl;
+	//DEBUG: output uniqWords
+//	std::cout << "occurrence:" << std::endl;
+//	for (const auto &it: *uniqWords)
+//		std::cout << '|' << it << '|' << std::endl;
 
-	std::cout << "result is:" << std::endl;
 	std::cout << uniqWords->size() << std::endl;
 
 	return 0;
 }
 
-void ParseWords(std::deque<std::string>* textBlocks, std::unordered_set<std::string>* uniqWords, std::mutex& writeDequeMtx, std::mutex& writeUniqMtx) {
+void ParseWords(std::deque<std::string> *strBlocks, std::unordered_set<std::string> *uniqWords, std::mutex &blocksMtx, std::mutex &wordMtx) {
 	using namespace std::chrono_literals;
-	while (textBlocks->empty())
-		std::this_thread::sleep_for(500ms); //TODO: implement conditional waits
+	while (strBlocks->empty()) std::this_thread::sleep_for(500ms); //TODO: implement conditional waits
 
-	writeDequeMtx.lock();
-	auto* str = new std::string(textBlocks->front());
-	textBlocks->pop_front();
-	writeDequeMtx.unlock();
+	blocksMtx.lock();
+	auto *str = new std::string(strBlocks->front());
+	strBlocks->pop_front();
+	blocksMtx.unlock();
 
-	size_t strLen = str->length();
+	const size_t strLen = str->length();
 	for (size_t i = 0; i < strLen; ++i) {
-		for (; i < strLen && isspace((*str)[i]); ++i); // skipping all next whitespaces
+		for (; i < strLen && isspace((*str)[i]); ++i); // skipping all next spaces
 
 		if (i == strLen) break; // if contain only spaces, so nothing to store
 
-		size_t wordStart{i}, wordLen{0};
+		size_t wordStart = i, wordLen = 0;
 		for (; i < strLen && isalpha((*str)[i]); ++i, ++wordLen); // measuring word length
 
-		if (wordLen == 0) continue;
-
-		if (i == strLen) // if reach str end, word is unfinished, so we need backup this part
-		{ // in case we reach end file last word counting as separate word,
-			writeUniqMtx.lock();
-			auto [it, status] = uniqWords->insert(std::string(*str, wordStart, wordLen));
-//			if (status)
-//				std::cout << "at str end newWord:" << ": " << *it << std::endl;
-			writeUniqMtx.unlock();
-			break;
-		} else { // we found space, so add word to storage
-			writeUniqMtx.lock();
-			auto [it, status] = uniqWords->insert(std::string(*str, wordStart, wordLen));
-//			if (status)
-//				std::cout << "newWord:" << *it << std::endl;
-			writeUniqMtx.unlock();
-		}
+		wordMtx.lock();
+		uniqWords->insert(std::string(*str, wordStart, wordLen)); // savin found word
+		wordMtx.unlock();
 	}
 }
 
 void FileParser(std::deque<std::string> *parsingQueue, std::ifstream &file, std::mutex &write_mtx) {
-	constexpr ssize_t bufferSize = 10; // 1 Mb
-	char *prevBuffer = nullptr;
+	constexpr ssize_t bufferSize = 1'000; // 1 Mb
 	size_t prevBufferSize = 0;
+	char *prevBuffer = nullptr;
 	file.seekg(0, std::ios::beg); // rewind to the beginning of fileBlocks
 
 	while (file) {
 		std::unique_ptr<char[]> buffer = std::make_unique<char[]>(prevBufferSize + bufferSize);
 		if (prevBuffer != nullptr) {
-			for (int i = 0; i < prevBufferSize; ++i) { // restoring remaining word part to buffer
-				buffer[i] = prevBuffer[i];
+			for (int i = 0; i < prevBufferSize; ++i) {
+				buffer[i] = prevBuffer[i]; // restoring remaining word part to buffer
 			}
 			free(prevBuffer);
 		}
 
-		file.read(buffer.get() + prevBufferSize, bufferSize);
+		file.read(buffer.get() + prevBufferSize, bufferSize); // reading text portion
 		ssize_t bytesRead = file.gcount();
 		if (bytesRead == 0) break;
 
-//		std::cout << "read:" << std::string (buffer.get(), 0, prevBufferSize + bytesRead) << std::endl;
 		size_t actualBufferSize = prevBufferSize + bytesRead;
 		size_t splitSize = actualBufferSize;
 		for (; splitSize > 0; --splitSize) {
 			if (isspace(buffer[splitSize - 1])) {
-				break;
+				break; // finding last completed word
 			}
 		}
 
-		if (splitSize == 0) { // backup whole block
+		if (splitSize == 0) {
 			prevBufferSize = actualBufferSize;
-			prevBuffer = (char *) malloc(actualBufferSize);
-			for (int i = 0; i < actualBufferSize; ++i) {
-				prevBuffer[i] = buffer[i];
-			}
-		} else { // split after last complete word
+			prevBuffer = BackupBlock(buffer, 0, prevBufferSize); // backup whole block
+		} else {
 			write_mtx.lock();
-			auto tmp = parsingQueue->emplace_back(buffer.get(), 0, splitSize);
-//			std::cout << "queue add:" << tmp << std::endl;
+			parsingQueue->emplace_back(buffer.get(), 0, splitSize); // save block till last complete word
 			write_mtx.unlock();
 
-			//and backup remain parts
-			size_t remainsBlockLength = actualBufferSize - splitSize;
-			prevBufferSize = remainsBlockLength;
-			prevBuffer = (char *) malloc(prevBufferSize);
-			for (int i = 0; i < prevBufferSize; ++i) {
-				prevBuffer[i] = buffer[splitSize + i];
-			}
-			write_mtx.lock();
-//			std::cout << "queue add:" << std::string(buffer.get(), splitSize - 1, prevBufferSize) << std::endl;
-			write_mtx.unlock();
+			prevBufferSize = actualBufferSize - splitSize;
+			prevBuffer = BackupBlock(buffer, splitSize, prevBufferSize); // backup remain parts
 		}
 	}
+}
+
+char *BackupBlock(const std::unique_ptr<char[]> &buffer, size_t startPos, size_t prevBufferSize) {
+	char *prevBuffer = (char *) malloc(prevBufferSize);
+	for (unsigned int i = 0; i < prevBufferSize; ++i) {
+		prevBuffer[i] = buffer[startPos + i];
+	}
+
+	return prevBuffer;
 }
