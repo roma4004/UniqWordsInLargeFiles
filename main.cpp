@@ -3,16 +3,18 @@
 #include <filesystem> // Compile with /std:c++17 or higher
 #include <thread>
 #include <mutex>
-#include <chrono>
 #include <unordered_set>
 #include <deque>
 
 #include "testFileGenerator.h"
 
-void FileParser(std::deque<std::string> *parsingQueue, std::ifstream &file, std::mutex &write_mtx);
+void FileParser(std::deque<std::string> *parsingQueue, std::ifstream &file,
+                std::mutex &queueMtx,
+                std::atomic<bool> &endOfRead, std::atomic<size_t> &queueSize);
 
-void ParseWords(std::deque<std::string> *strBlocks, std::unordered_set<std::string> *uniqWords,
-				std::mutex &blocksMtx, std::mutex &wordMtx);
+void ParseWords(std::deque<std::string> *parsingQueue, std::unordered_set<std::string> *uniqWords,
+                std::mutex &queueMtx, std::mutex &wordMtx,
+                std::atomic<bool> &endOfRead, std::atomic<size_t> &queueSize);
 
 char *BackupBlock(const std::unique_ptr<char[]> &buffer, size_t startPos, size_t prevBufferSize);
 
@@ -25,7 +27,7 @@ int main(int argc, char *argv[]) {
 	const std::string command1{"./run_test"};
 	bool isCommand = true;
 	size_t commandLength = command1.length();
-	for (unsigned int i = 0; argv[1][i] != '\0' && i < commandLength; ++i) {
+	for (size_t i = 0; argv[1][i] != '\0' && i < commandLength; ++i) {
 		if (argv[1][i] != command1[i]) {
 			isCommand = false;
 			break;
@@ -52,25 +54,35 @@ int main(int argc, char *argv[]) {
 	const unsigned int threadsAmount = std::thread::hardware_concurrency();
 	std::mutex blockMtx, wordMtx;
 	std::vector<std::thread> threads(threadsAmount);
-	auto *uniqWords = new std::unordered_set<std::string>(); //TODO: check it can be just char* ?
+	std::atomic<bool> endOfRead(false);
+	std::atomic<size_t> queueSize(0);
+	auto *uniqWords = new std::unordered_set<std::string>();
 	auto *strBlocks = new std::deque<std::string>();
-//TODO: add atomic bool to display for all thread that queue adding in progress, then if false thread end their work if see empty queue;
+
 	if (threadsAmount == 1) {
-		std::thread t1 = std::thread{FileParser, strBlocks, std::ref(file), std::ref(blockMtx)};
+		std::thread t1 = std::thread{FileParser, strBlocks, std::ref(file), std::ref(blockMtx),
+		                             std::ref(endOfRead), std::ref(queueSize)};
 		t1.join();
-		std::thread t2 = std::thread{ParseWords, strBlocks, uniqWords, std::ref(blockMtx), std::ref(wordMtx)};
+		std::thread t2 = std::thread{ParseWords, strBlocks, uniqWords,
+		                             std::ref(blockMtx), std::ref(wordMtx),
+		                             std::ref(endOfRead), std::ref(queueSize)};
 		t2.join();
 	} else {
 		for (unsigned int id = 0; id < threadsAmount; ++id) {
 			if (id == 0) {
-				threads[id] = std::thread{FileParser, strBlocks, std::ref(file), std::ref(blockMtx)};
+				threads[id] = std::thread{FileParser, strBlocks, std::ref(file),
+				                          std::ref(blockMtx),
+				                          std::ref(endOfRead), std::ref(queueSize)};
 			} else {
-				threads[id] = std::thread{ParseWords, strBlocks, uniqWords, std::ref(blockMtx), std::ref(wordMtx)};
+				threads[id] = std::thread{ParseWords, strBlocks, uniqWords,
+				                          std::ref(blockMtx), std::ref(wordMtx),
+				                          std::ref(endOfRead), std::ref(queueSize)};
 			}
 		}
 
 		for (auto &thread: threads) thread.join();
 	}
+	delete strBlocks;
 
 	file.close();
 
@@ -85,38 +97,64 @@ int main(int argc, char *argv[]) {
 //		std::cout << '|' << it << '|' << std::endl;
 
 	std::cout << uniqWords->size() << std::endl;
+	delete uniqWords;
 
 	return 0;
 }
 
-void ParseWords(std::deque<std::string> *strBlocks, std::unordered_set<std::string> *uniqWords, std::mutex &blocksMtx, std::mutex &wordMtx) {
-	using namespace std::chrono_literals;
-	while (strBlocks->empty()) std::this_thread::sleep_for(500ms); //TODO: implement conditional waits
+void ParseWords(std::deque<std::string> *parsingQueue, std::unordered_set<std::string> *uniqWords,
+                std::mutex &queueMtx, std::mutex &wordMtx,
+                std::atomic<bool> &endOfRead, std::atomic<size_t> &queueSize) {
+	auto *uniqWordsLocal = new std::unordered_set<std::string>();
+	while (true) {
+		queueMtx.lock();
+		bool isBlocksEmpty = parsingQueue->empty();
+		queueMtx.unlock();
 
-	blocksMtx.lock();
-	auto *str = new std::string(strBlocks->front());
-	strBlocks->pop_front();
-	blocksMtx.unlock();
+		if (endOfRead.load() && isBlocksEmpty)
+		{
+			break;
+		}
 
-	const size_t strLen = str->length();
-	for (size_t i = 0; i < strLen; ++i) {
-		for (; i < strLen && isspace((*str)[i]); ++i); // skipping all next spaces
+		if (!isBlocksEmpty) {
+			queueMtx.lock();
+			auto *str = new std::string(parsingQueue->front());
+			parsingQueue->pop_front();
+			--queueSize;
+//			std::cout << "q:" << queueSize << std::endl;
+			queueMtx.unlock();
 
-		if (i == strLen) break; // if contain only spaces, so nothing to store
+			const size_t strLen = str->length();
+			for (size_t i = 0; i < strLen; ++i) {
+				for (; i < strLen && isspace((*str)[i]); ++i); // skipping all next spaces
 
-		size_t wordStart = i, wordLen = 0;
-		for (; i < strLen && isalpha((*str)[i]); ++i, ++wordLen); // measuring word length
+				if (i == strLen) break; // if contain only spaces, so nothing to store
 
-		wordMtx.lock();
-		uniqWords->insert(std::string(*str, wordStart, wordLen)); // savin found word
-		wordMtx.unlock();
+				size_t wordStart = i, wordLen = 0;
+				for (; i < strLen && isalpha((*str)[i]); ++i, ++wordLen); // measuring word length
+
+				uniqWordsLocal->emplace(*str, wordStart, wordLen); // savin found word
+			}
+			delete str;
+		} else {
+			std::this_thread::yield(); // other threads can push work to the queue now
+		}
 	}
+	wordMtx.lock();
+	uniqWords->insert(uniqWordsLocal->begin(), uniqWordsLocal->end());
+	wordMtx.unlock();
+	delete uniqWordsLocal;
 }
 
-void FileParser(std::deque<std::string> *parsingQueue, std::ifstream &file, std::mutex &write_mtx) {
-	constexpr ssize_t bufferSize = 1'000; // 1 Mb
-	size_t prevBufferSize = 0;
-	char *prevBuffer = nullptr;
+void FileParser(std::deque<std::string> *parsingQueue, std::ifstream &file,
+                std::mutex &queueMtx,
+                std::atomic<bool> &endOfRead, std::atomic<size_t> &queueSize) {
+	constexpr ssize_t bufferSize = 1'000'000; // 1 Mb
+//	size_t readTotal{0};
+	const unsigned int maxQueueSize = std::thread::hardware_concurrency();
+
+	size_t prevBufferSize{0};
+	char *prevBuffer{nullptr};
 	file.seekg(0, std::ios::beg); // rewind to the beginning of fileBlocks
 
 	while (file) {
@@ -130,6 +168,8 @@ void FileParser(std::deque<std::string> *parsingQueue, std::ifstream &file, std:
 
 		file.read(buffer.get() + prevBufferSize, bufferSize); // reading text portion
 		ssize_t bytesRead = file.gcount();
+//		readTotal += bytesRead;
+//		std::cout << readTotal << std::endl;
 		if (bytesRead == 0) break;
 
 		size_t actualBufferSize = prevBufferSize + bytesRead;
@@ -144,19 +184,25 @@ void FileParser(std::deque<std::string> *parsingQueue, std::ifstream &file, std:
 			prevBufferSize = actualBufferSize;
 			prevBuffer = BackupBlock(buffer, 0, prevBufferSize); // backup whole block
 		} else {
-			write_mtx.lock();
-			parsingQueue->emplace_back(buffer.get(), 0, splitSize); // save block till last complete word
-			write_mtx.unlock();
+			while (queueSize.load() > maxQueueSize) {
+				std::this_thread::yield();
+			}
+			queueMtx.lock();
+			parsingQueue->emplace_back(buffer.get(), 0, splitSize); // split and save block till last complete word
+			++queueSize;
+			queueMtx.unlock();
 
 			prevBufferSize = actualBufferSize - splitSize;
 			prevBuffer = BackupBlock(buffer, splitSize, prevBufferSize); // backup remain parts
 		}
 	}
+//	std::cout << "EOF" << std::endl;
+	endOfRead.store(true);
 }
 
 char *BackupBlock(const std::unique_ptr<char[]> &buffer, size_t startPos, size_t prevBufferSize) {
 	char *prevBuffer = (char *) malloc(prevBufferSize);
-	for (unsigned int i = 0; i < prevBufferSize; ++i) {
+	for (size_t i = 0; i < prevBufferSize; ++i) {
 		prevBuffer[i] = buffer[startPos + i];
 	}
 
